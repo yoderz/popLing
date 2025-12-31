@@ -95,7 +95,7 @@ try:
     from qgis.core import (
         QgsProject, QgsVectorLayer, QgsRasterLayer, QgsPointXY, 
         QgsFeature, QgsGeometry, QgsField, QgsWkbTypes, QgsCoordinateTransform,
-        QgsCoordinateReferenceSystem, QgsRaster, QgsRectangle, QgsPoint
+        QgsCoordinateReferenceSystem, QgsRaster, QgsRectangle, QgsPoint, QgsRasterBandStats
     )
     # #region agent log
     _early_log("qgis.core imported successfully")
@@ -312,6 +312,86 @@ class popLing:
                 action)
             self.iface.removeToolBarIcon(action)
 
+    def get_raster_statistics(self, raster_layer, band=1):
+        """Get raster statistics (min/max) using QgsRasterBandStats"""
+        # #region agent log
+        debug_log("popLing.get_raster_statistics", "Function entry", {
+            "raster": raster_layer.name(),
+            "band": band
+        }, hypothesis_id="D")
+        # #endregion
+        try:
+            provider = raster_layer.dataProvider()
+            stats = provider.bandStatistics(band, QgsRasterBandStats.Min | QgsRasterBandStats.Max, raster_layer.extent())
+            # #region agent log
+            debug_log("popLing.get_raster_statistics", "Statistics obtained", {
+                "min": stats.minimumValue,
+                "max": stats.maximumValue,
+                "has_stats": stats.minimumValue is not None and stats.maximumValue is not None
+            }, hypothesis_id="D")
+            # #endregion
+            return {
+                "min": stats.minimumValue,
+                "max": stats.maximumValue
+            }
+        except Exception as e:
+            # #region agent log
+            debug_log("popLing.get_raster_statistics", "Exception caught", {
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }, hypothesis_id="D")
+            # #endregion
+            return None
+    
+    def get_density_range_for_value(self, value, density_ranges):
+        """Determine which density range a raster value falls into"""
+        # #region agent log
+        debug_log("popLing.get_density_range_for_value", "Function entry", {
+            "value": value,
+            "num_ranges": len(density_ranges)
+        }, hypothesis_id="E")
+        # #endregion
+        if value is None:
+            return None
+        
+        for i, range_def in enumerate(density_ranges):
+            min_val = range_def["min"]
+            max_val = range_def["max"]
+            # Check if value falls within range (inclusive boundaries)
+            if min_val <= value <= max_val:
+                # #region agent log
+                debug_log("popLing.get_density_range_for_value", "Range matched", {
+                    "value": value,
+                    "range_index": i,
+                    "min": min_val,
+                    "max": max_val,
+                    "points_per_cell": range_def["points_per_cell"]
+                }, hypothesis_id="E")
+                # #endregion
+                return range_def
+        
+        # #region agent log
+        debug_log("popLing.get_density_range_for_value", "No range matched", {
+            "value": value
+        }, hypothesis_id="E")
+        # #endregion
+        return None
+    
+    def should_place_point(self, probability):
+        """Random decision when points_per_cell < 1"""
+        if probability <= 0:
+            return False
+        if probability >= 1:
+            return True
+        result = random.random() < probability
+        # #region agent log
+        debug_log("popLing.should_place_point", "Random decision", {
+            "probability": probability,
+            "result": result
+        }, hypothesis_id="F")
+        # #endregion
+        return result
+
     def get_raster_value_at_point(self, raster_layer, point):
         """Get raster value at a given point."""
         # #region agent log
@@ -353,46 +433,19 @@ class popLing:
             # #endregion
             return None
 
-    def generate_points_in_polygon(self, polygon_layer, raster_layer, min_points=10, max_points_per_cell=5):
-        """Generate points within polygon based on raster density."""
+    def generate_points_in_polygon(self, polygon_layer, raster_layer, density_ranges, raster_points_per_sample_width=2.0):
+        """Generate points within polygon based on raster density ranges."""
         # #region agent log
         debug_log("popLing.generate_points_in_polygon", "Function entry", {
             "polygon_layer": polygon_layer.name(),
             "raster_layer": raster_layer.name(),
-            "min_points": min_points,
-            "max_points_per_cell": max_points_per_cell
+            "num_ranges": len(density_ranges),
+            "raster_points_per_sample_width": raster_points_per_sample_width
         }, hypothesis_id="B")
         # #endregion
-        points = []
-        features = polygon_layer.getFeatures()
+        all_points = []
         
-        # Get the first polygon feature
-        polygon_feature = next(features, None)
-        # #region agent log
-        debug_log("popLing.generate_points_in_polygon", "Polygon feature retrieved", {
-            "has_feature": polygon_feature is not None
-        }, hypothesis_id="B")
-        # #endregion
-        if not polygon_feature:
-            # #region agent log
-            debug_log("popLing.generate_points_in_polygon", "No polygon feature found - early exit", {}, hypothesis_id="B")
-            # #endregion
-            return points
-        
-        polygon_geom = polygon_feature.geometry()
-        
-        # Get bounding box of polygon
-        bbox = polygon_geom.boundingBox()
-        # #region agent log
-        debug_log("popLing.generate_points_in_polygon", "Bounding box calculated", {
-            "x_min": bbox.xMinimum(),
-            "x_max": bbox.xMaximum(),
-            "y_min": bbox.yMinimum(),
-            "y_max": bbox.yMaximum()
-        }, hypothesis_id="B")
-        # #endregion
-        
-        # Get raster extent and resolution
+        # Get raster extent and resolution (same for all polygons)
         raster_extent = raster_layer.extent()
         raster_width = raster_layer.width()
         raster_height = raster_layer.height()
@@ -403,8 +456,7 @@ class popLing:
             "raster_width": raster_width,
             "raster_height": raster_height,
             "x_res": x_res,
-            "y_res": y_res,
-            "extent": f"{raster_extent.xMinimum()},{raster_extent.yMinimum()},{raster_extent.xMaximum()},{raster_extent.yMaximum()}"
+            "y_res": y_res
         }, hypothesis_id="B")
         # #endregion
         
@@ -412,13 +464,6 @@ class popLing:
         polygon_crs = polygon_layer.crs()
         raster_crs = raster_layer.crs()
         transform = None
-        # #region agent log
-        debug_log("popLing.generate_points_in_polygon", "CRS check", {
-            "polygon_crs": polygon_crs.authid(),
-            "raster_crs": raster_crs.authid(),
-            "needs_transform": polygon_crs != raster_crs
-        }, hypothesis_id="B")
-        # #endregion
         if polygon_crs != raster_crs:
             transform = QgsCoordinateTransform(
                 polygon_crs, raster_crs, QgsProject.instance())
@@ -426,123 +471,115 @@ class popLing:
             debug_log("popLing.generate_points_in_polygon", "Transform created", {}, hypothesis_id="B")
             # #endregion
         
-        # Sample raster at grid points within polygon
-        cell_size = min(x_res, y_res) * 2  # Use 2x raster resolution for sampling
+        # Calculate cell size
+        raster_cell_size = min(x_res, y_res)
+        cell_size = raster_cell_size * raster_points_per_sample_width
         # #region agent log
-        debug_log("popLing.generate_points_in_polygon", "Cell size calculated", {"cell_size": cell_size}, hypothesis_id="B")
+        debug_log("popLing.generate_points_in_polygon", "Cell size calculated", {
+            "raster_cell_size": raster_cell_size,
+            "raster_points_per_sample_width": raster_points_per_sample_width,
+            "cell_size": cell_size
+        }, hypothesis_id="B")
         # #endregion
         
-        x_min = bbox.xMinimum()
-        x_max = bbox.xMaximum()
-        y_min = bbox.yMinimum()
-        y_max = bbox.yMaximum()
+        # Process all polygons
+        features = polygon_layer.getFeatures()
+        polygon_count = 0
+        total_cells_processed = 0
+        total_points_generated = 0
         
-        # Create grid of sample points
-        sample_points = []
-        sample_count = 0
-        points_checked = 0
-        x = x_min
-        while x <= x_max:
-            y = y_min
-            while y <= y_max:
-                point = QgsPointXY(x, y)
-                points_checked += 1
-                
-                # Check if point is within polygon
-                if polygon_geom.contains(point):
-                    # Get raster value at this point
-                    if transform:
-                        raster_point = transform.transform(point)
-                    else:
-                        raster_point = point
+        for polygon_feature in features:
+            polygon_count += 1
+            polygon_geom = polygon_feature.geometry()
+            
+            # Get bounding box of polygon
+            bbox = polygon_geom.boundingBox()
+            # #region agent log
+            debug_log("popLing.generate_points_in_polygon", f"Processing polygon {polygon_count}", {
+                "x_min": bbox.xMinimum(),
+                "x_max": bbox.xMaximum(),
+                "y_min": bbox.yMinimum(),
+                "y_max": bbox.yMaximum()
+            }, hypothesis_id="B")
+            # #endregion
+            
+            x_min = bbox.xMinimum()
+            x_max = bbox.xMaximum()
+            y_min = bbox.yMinimum()
+            y_max = bbox.yMaximum()
+            
+            # Create grid of sample points for this polygon
+            x = x_min
+            while x <= x_max:
+                y = y_min
+                while y <= y_max:
+                    point = QgsPointXY(x, y)
                     
-                    density = self.get_raster_value_at_point(raster_layer, raster_point)
-                    if density is not None and density > 0:
-                        sample_points.append((point, density))
-                        sample_count += 1
-                
-                y += cell_size
-            x += cell_size
-        
-        # #region agent log
-        debug_log("popLing.generate_points_in_polygon", "Sampling complete", {
-            "points_checked": points_checked,
-            "sample_points_found": sample_count,
-            "total_samples": len(sample_points)
-        }, hypothesis_id="B")
-        # #endregion
-        
-        if not sample_points:
-            # #region agent log
-            debug_log("popLing.generate_points_in_polygon", "No sample points - early exit", {}, hypothesis_id="B")
-            # #endregion
-            return points
-        
-        # Normalize densities
-        max_density = max(d for _, d in sample_points)
-        min_density = min(d for _, d in sample_points)
-        density_range = max_density - min_density if max_density != min_density else 1
-        # #region agent log
-        debug_log("popLing.generate_points_in_polygon", "Density normalization", {
-            "min_density": min_density,
-            "max_density": max_density,
-            "density_range": density_range
-        }, hypothesis_id="B")
-        # #endregion
-        
-        # Generate points based on density
-        cells_processed = 0
-        points_generated = 0
-        for point, density in sample_points:
-            # Normalize density to 0-1 range
-            normalized_density = (density - min_density) / density_range
-            
-            # Calculate number of points for this cell (scaled by density)
-            num_points = int(min_points + (normalized_density * max_points_per_cell))
-            # #region agent log
-            if cells_processed < 5:  # Log first 5 cells for debugging
-                debug_log("popLing.generate_points_in_polygon", "Processing cell", {
-                    "cell_index": cells_processed,
-                    "density": density,
-                    "normalized_density": normalized_density,
-                    "num_points": num_points
-                }, hypothesis_id="B")
-            # #endregion
-            
-            # Generate random points within a small area around the sample point
-            for _ in range(num_points):
-                # Random offset within cell
-                offset_x = random.uniform(-cell_size/2, cell_size/2)
-                offset_y = random.uniform(-cell_size/2, cell_size/2)
-                
-                new_point = QgsPointXY(
-                    point.x() + offset_x,
-                    point.y() + offset_y
-                )
-                
-                # Verify point is still within polygon
-                if polygon_geom.contains(new_point):
-                    points.append(new_point)
-                    points_generated += 1
-            
-            cells_processed += 1
+                    # Check if point is within polygon
+                    if polygon_geom.contains(point):
+                        # Get raster value at this point
+                        if transform:
+                            raster_point = transform.transform(point)
+                        else:
+                            raster_point = point
+                        
+                        raster_value = self.get_raster_value_at_point(raster_layer, raster_point)
+                        
+                        # Find which density range this value falls into
+                        matched_range = self.get_density_range_for_value(raster_value, density_ranges)
+                        
+                        if matched_range:
+                            points_per_cell = matched_range["points_per_cell"]
+                            
+                            # Handle fractional points_per_cell
+                            if points_per_cell >= 1:
+                                # Generate integer number of points
+                                num_points = int(points_per_cell)
+                                for _ in range(num_points):
+                                    offset_x = random.uniform(-cell_size/2, cell_size/2)
+                                    offset_y = random.uniform(-cell_size/2, cell_size/2)
+                                    new_point = QgsPointXY(
+                                        point.x() + offset_x,
+                                        point.y() + offset_y
+                                    )
+                                    if polygon_geom.contains(new_point):
+                                        all_points.append(new_point)
+                                        total_points_generated += 1
+                            else:
+                                # Fractional: randomly decide whether to place 1 point
+                                if self.should_place_point(points_per_cell):
+                                    offset_x = random.uniform(-cell_size/2, cell_size/2)
+                                    offset_y = random.uniform(-cell_size/2, cell_size/2)
+                                    new_point = QgsPointXY(
+                                        point.x() + offset_x,
+                                        point.y() + offset_y
+                                    )
+                                    if polygon_geom.contains(new_point):
+                                        all_points.append(new_point)
+                                        total_points_generated += 1
+                            
+                            total_cells_processed += 1
+                    
+                    y += cell_size
+                x += cell_size
         
         # #region agent log
         debug_log("popLing.generate_points_in_polygon", "Point generation complete", {
-            "cells_processed": cells_processed,
-            "points_generated": points_generated,
-            "total_points": len(points)
+            "polygons_processed": polygon_count,
+            "cells_processed": total_cells_processed,
+            "points_generated": total_points_generated,
+            "total_points": len(all_points)
         }, hypothesis_id="B")
         # #endregion
-        return points
+        return all_points
 
     def run(self):
         """Run method that performs all the real work"""
         # #region agent log
         debug_log("popLing.run", "Function entry - plugin run started", {}, hypothesis_id="C")
         # #endregion
-        # Show dialog
-        dlg = popLingDialog()
+        # Show dialog with stats callback
+        dlg = popLingDialog(stats_callback=self.get_raster_statistics)
         
         # Check if we have required layers
         polygon_count = dlg.polygon_combo.count()
@@ -584,14 +621,15 @@ class popLing:
         
         polygon_layer = dlg.get_polygon_layer()
         raster_layer = dlg.get_raster_layer()
-        min_points = dlg.get_min_points()
-        max_points = dlg.get_max_points()
+        raster_points_per_sample_width = dlg.get_raster_points_per_sample_width()
+        density_ranges = dlg.get_density_ranges()
+        
         # #region agent log
         debug_log("popLing.run", "User selections", {
             "polygon_layer": polygon_layer.name() if polygon_layer else None,
             "raster_layer": raster_layer.name() if raster_layer else None,
-            "min_points": min_points,
-            "max_points": max_points
+            "raster_points_per_sample_width": raster_points_per_sample_width,
+            "density_ranges": density_ranges
         }, hypothesis_id="C")
         # #endregion
         
@@ -605,6 +643,53 @@ class popLing:
                 "Please select both a polygon and raster layer.")
             return
         
+        # Validate raster_points_per_sample_width
+        if raster_points_per_sample_width <= 0:
+            # #region agent log
+            debug_log("popLing.run", "Invalid raster_points_per_sample_width - early exit", {
+                "raster_points_per_sample_width": raster_points_per_sample_width
+            }, hypothesis_id="C")
+            # #endregion
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "popLing",
+                "Raster Points per Sample Width must be greater than 0.")
+            return
+        
+        # Validate density ranges
+        is_valid, error_msg = dlg.validate_density_ranges()
+        if not is_valid:
+            # #region agent log
+            debug_log("popLing.run", "Invalid density ranges - early exit", {
+                "error": error_msg
+            }, hypothesis_id="C")
+            # #endregion
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "popLing",
+                f"Invalid density ranges: {error_msg}")
+            return
+        
+        if len(density_ranges) == 0:
+            # #region agent log
+            debug_log("popLing.run", "No density ranges defined - early exit", {}, hypothesis_id="C")
+            # #endregion
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "popLing",
+                "Please define at least one density range.")
+            return
+        
+        # Get and display raster statistics
+        stats = self.get_raster_statistics(raster_layer)
+        if stats:
+            # #region agent log
+            debug_log("popLing.run", "Raster statistics", {
+                "min": stats["min"],
+                "max": stats["max"]
+            }, hypothesis_id="C")
+            # #endregion
+        
         # Generate points
         self.iface.messageBar().pushMessage(
             "popLing",
@@ -617,8 +702,8 @@ class popLing:
         points = self.generate_points_in_polygon(
             polygon_layer, 
             raster_layer,
-            min_points=min_points,
-            max_points_per_cell=max_points
+            density_ranges,
+            raster_points_per_sample_width=raster_points_per_sample_width
         )
         # #region agent log
         debug_log("popLing.run", "Point generation completed", {"points_count": len(points)}, hypothesis_id="C")

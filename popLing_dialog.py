@@ -2,7 +2,7 @@
 Dialog for popLing plugin
 """
 
-from qgis.PyQt.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QPushButton, QSpinBox, QDoubleSpinBox, QGroupBox
+from qgis.PyQt.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QPushButton, QSpinBox, QDoubleSpinBox, QGroupBox, QTableWidget, QTableWidgetItem, QHeaderView
 from qgis.PyQt.QtCore import Qt
 from qgis.core import QgsProject, QgsVectorLayer, QgsRasterLayer, QgsWkbTypes
 
@@ -10,10 +10,11 @@ from qgis.core import QgsProject, QgsVectorLayer, QgsRasterLayer, QgsWkbTypes
 class popLingDialog(QDialog):
     """Dialog for selecting layers and parameters"""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, stats_callback=None):
         super().__init__(parent)
+        self.stats_callback = stats_callback  # Callback to get raster statistics
         self.setWindowTitle("popLing - Plot Points from Raster Density")
-        self.setMinimumWidth(400)
+        self.setMinimumWidth(500)
         
         layout = QVBoxLayout()
         
@@ -34,8 +35,14 @@ class popLingDialog(QDialog):
         raster_layout.addWidget(QLabel("Raster Layer:"))
         self.raster_combo = QComboBox()
         self.raster_combo.setMinimumWidth(250)
+        self.raster_combo.currentIndexChanged.connect(self.on_raster_changed)
         raster_layout.addWidget(self.raster_combo)
         layer_layout.addLayout(raster_layout)
+        
+        # Raster statistics display
+        self.raster_stats_label = QLabel("Raster Min/Max: Not loaded")
+        self.raster_stats_label.setStyleSheet("color: gray; font-style: italic;")
+        layer_layout.addWidget(self.raster_stats_label)
         
         layer_group.setLayout(layer_layout)
         layout.addWidget(layer_group)
@@ -66,8 +73,58 @@ class popLingDialog(QDialog):
         max_points_layout.addStretch()
         params_layout.addLayout(max_points_layout)
         
+        # Raster points per sample width
+        raster_points_layout = QHBoxLayout()
+        raster_points_layout.addWidget(QLabel("Raster Points per Sample Width:"))
+        self.raster_points_spin = QDoubleSpinBox()
+        self.raster_points_spin.setMinimum(0.1)
+        self.raster_points_spin.setMaximum(10.0)
+        self.raster_points_spin.setSingleStep(0.1)
+        self.raster_points_spin.setValue(2.0)
+        self.raster_points_spin.setToolTip("Number of raster cell widths per sampling grid cell. Smaller values = finer grid, larger values = coarser grid.")
+        raster_points_layout.addWidget(self.raster_points_spin)
+        raster_points_layout.addStretch()
+        params_layout.addLayout(raster_points_layout)
+        
         params_group.setLayout(params_layout)
         layout.addWidget(params_group)
+        
+        # Density ranges group
+        density_group = QGroupBox("Density Ranges")
+        density_layout = QVBoxLayout()
+        
+        # Instructions
+        instructions = QLabel("Define three density ranges. For each range, specify min/max raster values and points per cell.")
+        instructions.setWordWrap(True)
+        density_layout.addWidget(instructions)
+        
+        # Table for density ranges
+        self.density_table = QTableWidget()
+        self.density_table.setColumnCount(3)
+        self.density_table.setRowCount(3)
+        self.density_table.setHorizontalHeaderLabels(["Min Value", "Max Value", "Points per Cell"])
+        self.density_table.horizontalHeader().setStretchLastSection(True)
+        self.density_table.setMinimumHeight(120)
+        
+        # Set default values for the three ranges
+        # Range 1: Low density
+        self.density_table.setItem(0, 0, QTableWidgetItem("0"))
+        self.density_table.setItem(0, 1, QTableWidgetItem("33"))
+        self.density_table.setItem(0, 2, QTableWidgetItem("1.0"))
+        
+        # Range 2: Medium density
+        self.density_table.setItem(1, 0, QTableWidgetItem("33"))
+        self.density_table.setItem(1, 1, QTableWidgetItem("66"))
+        self.density_table.setItem(1, 2, QTableWidgetItem("2.0"))
+        
+        # Range 3: High density
+        self.density_table.setItem(2, 0, QTableWidgetItem("66"))
+        self.density_table.setItem(2, 1, QTableWidgetItem("100"))
+        self.density_table.setItem(2, 2, QTableWidgetItem("5.0"))
+        
+        density_layout.addWidget(self.density_table)
+        density_group.setLayout(density_layout)
+        layout.addWidget(density_group)
         
         # Buttons
         button_layout = QHBoxLayout()
@@ -118,4 +175,74 @@ class popLingDialog(QDialog):
     def get_max_points(self):
         """Get maximum points per cell"""
         return self.max_points_spin.value()
+    
+    def get_raster_points_per_sample_width(self):
+        """Get raster points per sample width"""
+        return self.raster_points_spin.value()
+    
+    def on_raster_changed(self, index):
+        """Update raster statistics display when raster layer changes"""
+        if index >= 0 and self.stats_callback:
+            raster_layer = self.raster_combo.itemData(index)
+            if raster_layer:
+                self.raster_stats_label.setText("Raster Min/Max: Calculating...")
+                # Get statistics using callback
+                stats = self.stats_callback(raster_layer)
+                if stats:
+                    self.update_raster_stats(stats["min"], stats["max"])
+                else:
+                    self.raster_stats_label.setText("Raster Min/Max: Unable to calculate")
+                    self.raster_stats_label.setStyleSheet("color: red; font-style: italic;")
+        else:
+            self.raster_stats_label.setText("Raster Min/Max: Not loaded")
+            self.raster_stats_label.setStyleSheet("color: gray; font-style: italic;")
+    
+    def update_raster_stats(self, min_val, max_val):
+        """Update the raster statistics display"""
+        if min_val is not None and max_val is not None:
+            self.raster_stats_label.setText(f"Raster Min/Max: {min_val:.2f} / {max_val:.2f}")
+            self.raster_stats_label.setStyleSheet("color: black; font-style: normal;")
+        else:
+            self.raster_stats_label.setText("Raster Min/Max: Unable to calculate")
+            self.raster_stats_label.setStyleSheet("color: red; font-style: italic;")
+    
+    def get_density_ranges(self):
+        """Get density ranges from the table"""
+        ranges = []
+        for row in range(3):
+            min_item = self.density_table.item(row, 0)
+            max_item = self.density_table.item(row, 1)
+            points_item = self.density_table.item(row, 2)
+            
+            if min_item and max_item and points_item:
+                try:
+                    min_val = float(min_item.text())
+                    max_val = float(max_item.text())
+                    points_per_cell = float(points_item.text())
+                    
+                    ranges.append({
+                        "min": min_val,
+                        "max": max_val,
+                        "points_per_cell": points_per_cell
+                    })
+                except ValueError:
+                    # Skip invalid rows
+                    pass
+        
+        return ranges
+    
+    def validate_density_ranges(self):
+        """Validate that density ranges are properly configured"""
+        ranges = self.get_density_ranges()
+        if len(ranges) == 0:
+            return False, "No valid density ranges defined"
+        
+        # Check for overlapping or invalid ranges
+        for i, range1 in enumerate(ranges):
+            if range1["min"] >= range1["max"]:
+                return False, f"Range {i+1}: Min must be less than Max"
+            if range1["points_per_cell"] < 0:
+                return False, f"Range {i+1}: Points per cell cannot be negative"
+        
+        return True, ""
 
