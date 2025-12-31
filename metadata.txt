@@ -1,0 +1,12 @@
+[general]
+name=popLing
+qgisMinimumVersion=3.0
+description=Plots points within a polygon based on density values from a raster file
+version=1.0
+author=Z Yoder
+email=yoderz@gmail.com
+
+about=This plugin generates point features within a polygon layer based on density values from a raster layer. Higher density values in the raster will result in more points being generated in those areas.
+
+# end of metadata
+
