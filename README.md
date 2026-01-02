@@ -8,7 +8,7 @@ A QGIS plugin that generates point features within a polygon layer based on dens
 - Configure minimum and maximum points per cell
 - Automatically generates points based on raster density values
 - Creates a new point layer in your project
-- Handles coordinate reference system transformations automatically
+- Not yet working correctly: Handles coordinate reference system transformations automatically
 
 ## Installation
 
