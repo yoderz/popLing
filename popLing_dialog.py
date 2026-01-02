@@ -108,18 +108,18 @@ class popLingDialog(QDialog):
         
         # Set default values for the three ranges
         # Range 1: Low density
-        self.density_table.setItem(0, 0, QTableWidgetItem("0"))
-        self.density_table.setItem(0, 1, QTableWidgetItem("33"))
-        self.density_table.setItem(0, 2, QTableWidgetItem("1.0"))
+        self.density_table.setItem(0, 0, QTableWidgetItem("10"))
+        self.density_table.setItem(0, 1, QTableWidgetItem("200"))
+        self.density_table.setItem(0, 2, QTableWidgetItem(".3"))
         
         # Range 2: Medium density
-        self.density_table.setItem(1, 0, QTableWidgetItem("33"))
-        self.density_table.setItem(1, 1, QTableWidgetItem("66"))
-        self.density_table.setItem(1, 2, QTableWidgetItem("2.0"))
+        self.density_table.setItem(1, 0, QTableWidgetItem("200"))
+        self.density_table.setItem(1, 1, QTableWidgetItem("4000"))
+        self.density_table.setItem(1, 2, QTableWidgetItem("1.0"))
         
         # Range 3: High density
-        self.density_table.setItem(2, 0, QTableWidgetItem("66"))
-        self.density_table.setItem(2, 1, QTableWidgetItem("100"))
+        self.density_table.setItem(2, 0, QTableWidgetItem("4000"))
+        self.density_table.setItem(2, 1, QTableWidgetItem("25000"))
         self.density_table.setItem(2, 2, QTableWidgetItem("5.0"))
         
         density_layout.addWidget(self.density_table)
