@@ -895,7 +895,7 @@ class popLing:
             QMessageBox.warning(
                 self.iface.mainWindow(),
                 "popLing",
-                "No points were generated. Check that the polygon and raster overlap.")
+                "No points were generated. Check that the polygon and raster overlap. CRS tranformation not yet working. Ensure the same CRS projection is used for the polygon and raster")
             return
         
         # Create new point layer
