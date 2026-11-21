@@ -95,7 +95,8 @@ try:
     from qgis.core import (
         QgsProject, QgsVectorLayer, QgsRasterLayer, QgsPointXY, 
         QgsFeature, QgsGeometry, QgsField, QgsWkbTypes, QgsCoordinateTransform,
-        QgsCoordinateReferenceSystem, QgsRaster, QgsRectangle, QgsPoint, QgsRasterBandStats
+        QgsCoordinateReferenceSystem, QgsRaster, QgsRectangle, QgsPoint, QgsRasterBandStats,
+        Qgis
     )
     # #region agent log
     _early_log("qgis.core imported successfully")
@@ -465,7 +466,11 @@ class popLing:
             return None
 
     def generate_points_in_polygon(self, polygon_layer, raster_layer, density_ranges, raster_points_per_sample_width=2.0):
-        """Generate points within polygon based on raster density ranges."""
+        """Generate points within polygons based on raster density ranges.
+
+        Returns a list of (QgsPointXY, attributes) pairs. Attributes are the
+        values from the polygon feature that contains the point.
+        """
         # #region agent log
         debug_log("popLing.generate_points_in_polygon", "Function entry", {
             "polygon_layer": polygon_layer.name(),
@@ -554,203 +559,263 @@ class popLing:
         # #endregion
         
         # Process all polygons
-        features = polygon_layer.getFeatures()
+        features = list(polygon_layer.getFeatures())
         polygon_count = 0
         total_cells_processed = 0
         total_points_generated = 0
+
+        # Progress bar in QGIS message bar (kept lightweight; updates are throttled)
+        progress_widget = None
+        progress_bar = None
+        progress_total = 0
+        progress_done = 0
+
+        try:
+            # Estimate total number of grid cells to be evaluated (for progress)
+            for f in features:
+                try:
+                    geom = f.geometry()
+                    bbox = geom.boundingBox()
+                    if bbox.xMaximum() <= bbox.xMinimum() or bbox.yMaximum() <= bbox.yMinimum():
+                        continue
+                    estimated_cells = ((bbox.xMaximum() - bbox.xMinimum()) / cell_size) * ((bbox.yMaximum() - bbox.yMinimum()) / cell_size)
+                    if estimated_cells > 1000000:
+                        continue
+                    x_steps = int(math.floor((bbox.xMaximum() - bbox.xMinimum()) / cell_size)) + 1
+                    y_steps = int(math.floor((bbox.yMaximum() - bbox.yMinimum()) / cell_size)) + 1
+                    if x_steps > 0 and y_steps > 0:
+                        progress_total += x_steps * y_steps
+                except Exception:
+                    continue
+
+            if getattr(self, "iface", None) is not None and progress_total > 0:
+                from qgis.PyQt.QtWidgets import QProgressBar
+                msg = self.iface.messageBar().createMessage("popLing", "Generating points…")
+                progress_bar = QProgressBar()
+                progress_bar.setMaximum(100)
+                progress_bar.setMinimum(0)
+                progress_bar.setValue(0)
+                msg.layout().addWidget(progress_bar)
+                progress_widget = self.iface.messageBar().pushWidget(msg, Qgis.Info)
+        except Exception:
+            # Never fail the tool because of progress UI
+            progress_widget = None
+            progress_bar = None
         
-        for polygon_feature in features:
-            polygon_count += 1
-            polygon_geom = polygon_feature.geometry()
-            
-            # Get bounding box of polygon
-            bbox = polygon_geom.boundingBox()
-            # #region agent log
-            debug_log("popLing.generate_points_in_polygon", f"Processing polygon {polygon_count}", {
-                "x_min": bbox.xMinimum(),
-                "x_max": bbox.xMaximum(),
-                "y_min": bbox.yMinimum(),
-                "y_max": bbox.yMaximum()
-            }, hypothesis_id="B")
-            # #endregion
-            
-            x_min = bbox.xMinimum()
-            x_max = bbox.xMaximum()
-            y_min = bbox.yMinimum()
-            y_max = bbox.yMaximum()
-            
-            # Create grid of sample points for this polygon
-            # Safety check: prevent infinite loops
-            if x_max <= x_min or y_max <= y_min:
+        try:
+            for polygon_feature in features:
+                polygon_count += 1
+                polygon_geom = polygon_feature.geometry()
+
+                # Get bounding box of polygon
+                bbox = polygon_geom.boundingBox()
                 # #region agent log
-                debug_log("popLing.generate_points_in_polygon", "Invalid bounding box, skipping polygon", {
-                    "polygon_count": polygon_count,
-                    "x_min": x_min,
-                    "x_max": x_max,
-                    "y_min": y_min,
-                    "y_max": y_max
+                debug_log("popLing.generate_points_in_polygon", f"Processing polygon {polygon_count}", {
+                    "x_min": bbox.xMinimum(),
+                    "x_max": bbox.xMaximum(),
+                    "y_min": bbox.yMinimum(),
+                    "y_max": bbox.yMaximum()
                 }, hypothesis_id="B")
                 # #endregion
-                continue
-            
-            # Safety check: prevent processing too many cells
-            estimated_cells = ((x_max - x_min) / cell_size) * ((y_max - y_min) / cell_size)
-            if estimated_cells > 1000000:  # Limit to 1 million cells per polygon
-                # #region agent log
-                debug_log("popLing.generate_points_in_polygon", "Polygon too large, skipping", {
-                    "polygon_count": polygon_count,
-                    "estimated_cells": estimated_cells
-                }, hypothesis_id="B")
-                # #endregion
-                continue
-            
-            x = x_min
-            cells_in_polygon = 0
-            max_iterations = int(((x_max - x_min) / cell_size) * ((y_max - y_min) / cell_size)) + 1000
-            iteration_count = 0
-            
-            while x <= x_max and iteration_count < max_iterations:
-                y = y_min
-                while y <= y_max and iteration_count < max_iterations:
-                    iteration_count += 1
-                    try:
-                        point = QgsPointXY(x, y)
-                        
-                        # Check if point is within polygon
-                        if polygon_geom.contains(point):
-                            # Get raster value at this point
-                            if transform:
-                                try:
-                                    raster_point = transform.transform(point)
-                                except Exception as e:
-                                    # #region agent log
-                                    debug_log("popLing.generate_points_in_polygon", "Transform error", {
-                                        "error": str(e),
-                                        "point": f"({point.x()}, {point.y()})"
-                                    }, hypothesis_id="B")
-                                    # #endregion
-                                    y += cell_size
-                                    continue
-                            else:
-                                raster_point = point
-                            
-                            raster_value = self.get_raster_value_at_point(raster_layer, raster_point)
-                            
-                            # Skip if no valid raster value
-                            if raster_value is None:
-                                y += cell_size
-                                continue
-                            
-                            # Find which density range this value falls into
-                            matched_range = self.get_density_range_for_value(raster_value, density_ranges)
-                            
-                            if matched_range:
-                                points_per_cell = matched_range["points_per_cell"]
-                                
-                                # Handle fractional points_per_cell
-                                try:
-                                    points_per_cell = float(points_per_cell)
-                                except (ValueError, TypeError):
-                                    # #region agent log
-                                    debug_log("popLing.generate_points_in_polygon", "Invalid points_per_cell", {
-                                        "points_per_cell": points_per_cell,
-                                        "type": str(type(points_per_cell))
-                                    }, hypothesis_id="B")
-                                    # #endregion
-                                    y += cell_size
-                                    continue
-                                
-                                if points_per_cell >= 1:
-                                    # Generate integer number of points
+
+                x_min = bbox.xMinimum()
+                x_max = bbox.xMaximum()
+                y_min = bbox.yMinimum()
+                y_max = bbox.yMaximum()
+
+                # Create grid of sample points for this polygon
+                # Safety check: prevent infinite loops
+                if x_max <= x_min or y_max <= y_min:
+                    # #region agent log
+                    debug_log("popLing.generate_points_in_polygon", "Invalid bounding box, skipping polygon", {
+                        "polygon_count": polygon_count,
+                        "x_min": x_min,
+                        "x_max": x_max,
+                        "y_min": y_min,
+                        "y_max": y_max
+                    }, hypothesis_id="B")
+                    # #endregion
+                    continue
+
+                # Safety check: prevent processing too many cells
+                estimated_cells = ((x_max - x_min) / cell_size) * ((y_max - y_min) / cell_size)
+                if estimated_cells > 1000000:  # Limit to 1 million cells per polygon
+                    # #region agent log
+                    debug_log("popLing.generate_points_in_polygon", "Polygon too large, skipping", {
+                        "polygon_count": polygon_count,
+                        "estimated_cells": estimated_cells
+                    }, hypothesis_id="B")
+                    # #endregion
+                    continue
+
+                # Attributes copied onto every point generated inside this polygon
+                polygon_attrs = polygon_feature.attributes()
+
+                x = x_min
+                cells_in_polygon = 0
+                max_iterations = int(((x_max - x_min) / cell_size) * ((y_max - y_min) / cell_size)) + 1000
+                iteration_count = 0
+
+                while x <= x_max and iteration_count < max_iterations:
+                    y = y_min
+                    while y <= y_max and iteration_count < max_iterations:
+                        iteration_count += 1
+
+                        # Progress updates are throttled to keep the UI responsive
+                        progress_done += 1
+                        if progress_bar is not None and progress_total > 0 and (progress_done % 500 == 0 or progress_done == progress_total):
+                            try:
+                                progress_bar.setValue(int(min(100, (progress_done * 100) / progress_total)))
+                                QCoreApplication.processEvents()
+                            except Exception:
+                                pass
+
+                        try:
+                            point = QgsPointXY(x, y)
+
+                            # Check if point is within polygon
+                            if polygon_geom.contains(point):
+                                # Get raster value at this point
+                                if transform:
                                     try:
-                                        num_points = int(points_per_cell)
-                                        if num_points < 0 or num_points > 10000:  # Safety limit
-                                            # #region agent log
-                                            debug_log("popLing.generate_points_in_polygon", "Points per cell out of safe range", {
-                                                "num_points": num_points
-                                            }, hypothesis_id="B")
-                                            # #endregion
-                                            y += cell_size
-                                            continue
-                                    except (ValueError, OverflowError) as e:
+                                        raster_point = transform.transform(point)
+                                    except Exception as e:
                                         # #region agent log
-                                        debug_log("popLing.generate_points_in_polygon", "Error converting points_per_cell to int", {
-                                            "points_per_cell": points_per_cell,
-                                            "error": str(e)
+                                        debug_log("popLing.generate_points_in_polygon", "Transform error", {
+                                            "error": str(e),
+                                            "point": f"({point.x()}, {point.y()})"
                                         }, hypothesis_id="B")
                                         # #endregion
                                         y += cell_size
                                         continue
-                                    
-                                    for _ in range(num_points):
-                                        offset_x = random.uniform(-cell_size/2, cell_size/2)
-                                        offset_y = random.uniform(-cell_size/2, cell_size/2)
-                                        new_point = QgsPointXY(
-                                            point.x() + offset_x,
-                                            point.y() + offset_y
-                                        )
-                                        if polygon_geom.contains(new_point):
-                                            all_points.append(new_point)
-                                            total_points_generated += 1
                                 else:
-                                    # Fractional: randomly decide whether to place 1 point
-                                    if self.should_place_point(points_per_cell):
-                                        offset_x = random.uniform(-cell_size/2, cell_size/2)
-                                        offset_y = random.uniform(-cell_size/2, cell_size/2)
-                                        new_point = QgsPointXY(
-                                            point.x() + offset_x,
-                                            point.y() + offset_y
-                                        )
-                                        if polygon_geom.contains(new_point):
-                                            all_points.append(new_point)
-                                            total_points_generated += 1
-                                
-                                total_cells_processed += 1
-                                cells_in_polygon += 1
-                    except Exception as e:
+                                    raster_point = point
+
+                                raster_value = self.get_raster_value_at_point(raster_layer, raster_point)
+
+                                # Skip if no valid raster value
+                                if raster_value is None:
+                                    y += cell_size
+                                    continue
+
+                                # Find which density range this value falls into
+                                matched_range = self.get_density_range_for_value(raster_value, density_ranges)
+
+                                if matched_range:
+                                    points_per_cell = matched_range["points_per_cell"]
+
+                                    # Handle fractional points_per_cell
+                                    try:
+                                        points_per_cell = float(points_per_cell)
+                                    except (ValueError, TypeError):
+                                        # #region agent log
+                                        debug_log("popLing.generate_points_in_polygon", "Invalid points_per_cell", {
+                                            "points_per_cell": points_per_cell,
+                                            "type": str(type(points_per_cell))
+                                        }, hypothesis_id="B")
+                                        # #endregion
+                                        y += cell_size
+                                        continue
+
+                                    if points_per_cell >= 1:
+                                        # Generate integer number of points
+                                        try:
+                                            num_points = int(points_per_cell)
+                                            if num_points < 0 or num_points > 10000:  # Safety limit
+                                                # #region agent log
+                                                debug_log("popLing.generate_points_in_polygon", "Points per cell out of safe range", {
+                                                    "num_points": num_points
+                                                }, hypothesis_id="B")
+                                                # #endregion
+                                                y += cell_size
+                                                continue
+                                        except (ValueError, OverflowError) as e:
+                                            # #region agent log
+                                            debug_log("popLing.generate_points_in_polygon", "Error converting points_per_cell to int", {
+                                                "points_per_cell": points_per_cell,
+                                                "error": str(e)
+                                            }, hypothesis_id="B")
+                                            # #endregion
+                                            y += cell_size
+                                            continue
+
+                                        for _ in range(num_points):
+                                            offset_x = random.uniform(-cell_size/2, cell_size/2)
+                                            offset_y = random.uniform(-cell_size/2, cell_size/2)
+                                            new_point = QgsPointXY(
+                                                point.x() + offset_x,
+                                                point.y() + offset_y
+                                            )
+                                            if polygon_geom.contains(new_point):
+                                                all_points.append((new_point, polygon_attrs))
+                                                total_points_generated += 1
+                                    else:
+                                        # Fractional: randomly decide whether to place 1 point
+                                        if self.should_place_point(points_per_cell):
+                                            offset_x = random.uniform(-cell_size/2, cell_size/2)
+                                            offset_y = random.uniform(-cell_size/2, cell_size/2)
+                                            new_point = QgsPointXY(
+                                                point.x() + offset_x,
+                                                point.y() + offset_y
+                                            )
+                                            if polygon_geom.contains(new_point):
+                                                all_points.append((new_point, polygon_attrs))
+                                                total_points_generated += 1
+
+                                    total_cells_processed += 1
+                                    cells_in_polygon += 1
+                        except Exception as e:
+                            # #region agent log
+                            debug_log("popLing.generate_points_in_polygon", "Exception in cell processing", {
+                                "error": str(e),
+                                "traceback": traceback.format_exc(),
+                                "x": x,
+                                "y": y,
+                                "polygon_count": polygon_count,
+                                "iteration_count": iteration_count
+                            }, hypothesis_id="B")
+                            # #endregion
+                            # Continue processing other cells
+                            y += cell_size
+                            continue
+
+                        y += cell_size
+
+                    if iteration_count >= max_iterations:
                         # #region agent log
-                        debug_log("popLing.generate_points_in_polygon", "Exception in cell processing", {
-                            "error": str(e),
-                            "traceback": traceback.format_exc(),
-                            "x": x,
-                            "y": y,
+                        debug_log("popLing.generate_points_in_polygon", "Max iterations reached, breaking", {
                             "polygon_count": polygon_count,
-                            "iteration_count": iteration_count
+                            "iteration_count": iteration_count,
+                            "max_iterations": max_iterations
                         }, hypothesis_id="B")
                         # #endregion
-                        # Continue processing other cells
-                        y += cell_size
-                        continue
-                    
-                    y += cell_size
-                
-                if iteration_count >= max_iterations:
-                    # #region agent log
-                    debug_log("popLing.generate_points_in_polygon", "Max iterations reached, breaking", {
-                        "polygon_count": polygon_count,
-                        "iteration_count": iteration_count,
-                        "max_iterations": max_iterations
-                    }, hypothesis_id="B")
-                    # #endregion
-                    break
-                
-                x += cell_size
-            
+                        break
+
+                    x += cell_size
+
+                # #region agent log
+                debug_log("popLing.generate_points_in_polygon", f"Completed polygon {polygon_count}", {
+                    "cells_in_polygon": cells_in_polygon
+                }, hypothesis_id="B")
+                # #endregion
+
             # #region agent log
-            debug_log("popLing.generate_points_in_polygon", f"Completed polygon {polygon_count}", {
-                "cells_in_polygon": cells_in_polygon
+            debug_log("popLing.generate_points_in_polygon", "Point generation complete", {
+                "polygons_processed": polygon_count,
+                "cells_processed": total_cells_processed,
+                "points_generated": total_points_generated,
+                "total_points": len(all_points)
             }, hypothesis_id="B")
             # #endregion
-        
-        # #region agent log
-        debug_log("popLing.generate_points_in_polygon", "Point generation complete", {
-            "polygons_processed": polygon_count,
-            "cells_processed": total_cells_processed,
-            "points_generated": total_points_generated,
-            "total_points": len(all_points)
-        }, hypothesis_id="B")
-        # #endregion
-        return all_points
+            return all_points
+        finally:
+            try:
+                if progress_bar is not None:
+                    progress_bar.setValue(100)
+                if progress_widget is not None and getattr(self, "iface", None) is not None:
+                    self.iface.messageBar().popWidget(progress_widget)
+            except Exception:
+                pass
 
     def run(self):
         """Run method that performs all the real work"""
@@ -909,20 +974,44 @@ class popLing:
             "memory"
         )
         
-        # Add fields
+        # Copy every polygon attribute, then add a unique point id that
+        # does not collide with an existing polygon field name.
         provider = point_layer.dataProvider()
-        provider.addAttributes([QgsField("id", QVariant.Int)])
+        source_fields = polygon_layer.fields()
+        existing_names = {field.name().lower() for field in source_fields}
+        id_field_name = "id"
+        suffix = 0
+        while id_field_name.lower() in existing_names:
+            suffix += 1
+            id_field_name = "point_id" if suffix == 1 else f"point_id_{suffix}"
+
+        provider.addAttributes([QgsField(field) for field in source_fields])
+        provider.addAttributes([QgsField(id_field_name, QVariant.Int)])
         point_layer.updateFields()
+        source_field_count = source_fields.count()
+        for field_index in range(source_field_count):
+            alias = polygon_layer.attributeAlias(field_index)
+            if alias:
+                point_layer.setFieldAlias(field_index, alias)
         # #region agent log
-        debug_log("popLing.run", "Point layer fields added", {}, hypothesis_id="C")
+        debug_log("popLing.run", "Point layer fields added", {
+            "copied_fields": source_field_count,
+            "id_field": id_field_name
+        }, hypothesis_id="C")
         # #endregion
         
-        # Add features
+        # Add features, each carrying the attributes of the polygon it was generated in
         features = []
-        for i, point in enumerate(points):
-            feat = QgsFeature()
+        for i, (point, attrs) in enumerate(points):
+            feat = QgsFeature(point_layer.fields())
             feat.setGeometry(QgsGeometry.fromPointXY(point))
-            feat.setAttributes([i + 1])
+            values = list(attrs) if attrs is not None else []
+            if len(values) < source_field_count:
+                values.extend([None] * (source_field_count - len(values)))
+            elif len(values) > source_field_count:
+                values = values[:source_field_count]
+            values.append(i + 1)
+            feat.setAttributes(values)
             features.append(feat)
         
         provider.addFeatures(features)
